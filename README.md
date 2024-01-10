@@ -2,7 +2,7 @@
 Official PyTorch implementation of 
 [Shift-ConvNets: Small Convolutional Kernel with Large Kernel Effects]()
 <p align="center">
-<img src="SW.png" width="500" height="300">
+<img src="SW.png" width="500" height="320">
 </p>
 
 We propose the **Shift-Wise** operator, a ConvNet model that uses large convolutional kernels to capture long-range sparse dependencies.
