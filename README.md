@@ -102,7 +102,7 @@ Number of parameters:           48.01 M
  **name**   | **macs** | **params** 
 :----------:|:--------:|:----------:
  **SLaK-T** | 50.7 M   | 8.74 G     
- ** ours**  | 48.01 M  | 7.72 G     
+ **ours**   | 48.01 M  | 7.72 G     
 
 
 
