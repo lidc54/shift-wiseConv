@@ -1,4 +1,4 @@
-# shift-wise conv
+# [shift-wise conv](https://github.com/lidc54/shift-wiseConv)
 Official PyTorch implementation of 
 [Shift-ConvNets: Small Convolutional Kernel with Large Kernel Effects]()
 <p align="center">
@@ -6,6 +6,9 @@ Official PyTorch implementation of
 </p>
 
 We propose the **Shift-Wise** operator, a ConvNet model that uses large convolutional kernels to capture long-range sparse dependencies.
+
+More code will be released later.
+
 
 ## Installation
 
@@ -98,14 +101,25 @@ Number of parameters:           48.01 M
 [INFO] Register count_linear() for <class 'torch.nn.modules.linear.Linear'>.
 [INFO] Register count_normalization() for <class 'torch.nn.modules.normalization.LayerNorm'>.
 ----------2. macs:7701405072.0; params:47985520.0--------------
+
+#当width_factor 1.0时
+Computational complexity:       4.66 GMac
+Number of parameters:           28.74 M
+----------1. macs:4.66 GMac; params:28.74 M--------------
+[INFO] Register count_convNd() for <class 'torch.nn.modules.conv.Conv2d'>.
+[INFO] Register zero_ops() for <class 'torch.nn.modules.container.Sequential'>.
+[INFO] Register count_normalization() for <class 'torch.nn.modules.batchnorm.SyncBatchNorm'>.
+[INFO] Register count_linear() for <class 'torch.nn.modules.linear.Linear'>.
+[INFO] Register count_normalization() for <class 'torch.nn.modules.normalization.LayerNorm'>.
+----------2. macs:4645198236.0; params:28723543.0--------------
 ```
  **name**   | **macs** | **params** 
 :----------:|:--------:|:----------:
- **SLaK-T** | 50.7 M   | 8.74 G     
- **ours**   | 48.01 M  | 7.72 G     
-
-
-
+  **SLaK-T**  | 50.7 M   | 8.74 G       
+ **ours-1.3** | 48.01 M  | 7.72 G  
+ **ours-1.2** | 40.98 M  | 6.61 G      
+ **ours-1.1** | 34.57 M  | 5.59 G     
+ **ours-1.0** | 28.74 M  | 4.66 G     
 
 ## based on repository [Sparse Large Kernel Network - SLaK](https://github.com/VITA-Group/SLaK)
 
