@@ -1,6 +1,6 @@
 # [shift-wise conv](https://github.com/lidc54/shift-wiseConv)
 Official PyTorch implementation of 
-[Shift-ConvNets: Small Convolutional Kernel with Large Kernel Effects]()
+[Shift-ConvNets: Small Convolutional Kernel with Large Kernel Effects](https://arxiv.org/abs/2401.12736)
 <p align="center">
 <img src="SW.png" width="500" height="320">
 </p>
