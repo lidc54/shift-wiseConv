@@ -21,18 +21,17 @@ from pathlib import Path
 from timm.data.mixup import Mixup
 from timm.models import create_model
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
+from timm.models.registry import model_entrypoint
 from model_sema import ModelEma
 from optim_factory import create_optimizer, LayerDecayValueAssigner
 from datasets import build_dataset
 from engine import train_one_epoch, evaluate
-from utils import NativeScalerWithGradNormCount as NativeScaler
+from utils import NativeScalerWithGradNormCount as NativeScaler, flops_of_model
 from sparse_core import Masking, CosineDecay
 
 import utils
 from models import *
-# import models.SLaK
-# import models.SLaK_reg
-# import models.SLaK_pw
+from backbones import *
 
 def kernel_type(strings):
     strings = strings.replace("(", "").replace(")", "")
@@ -208,6 +207,9 @@ def get_args_parser():
 
     # large kernel
     parser.add_argument('--Decom', type=str2bool, default=False, help='Enabling kernel decomposition')
+    parser.add_argument('--ghost_ratio', type=float, default=0., help='How many parts will be seen as ghost.')
+    parser.add_argument('--N_path', default=2, type=int, help='How many rep convs before shift-add')
+    parser.add_argument('--N_rep', default=4, type=int, help='How many shift-add clones will be used')
     parser.add_argument('--width_factor', type=float, default=1.0, help='set the width factor of the model')
     parser.add_argument('--sparse', action='store_true', help='Enable sparse model. Default: False.')
     parser.add_argument('--kernel_size', nargs="*", type=int, default = [51,49,47,13,5], help='kernel size of conv [stage1, stage2, stage3, stage4, N]')
@@ -220,8 +222,11 @@ def get_args_parser():
     parser.add_argument('--fix', action='store_true', help='Fix sparse model during training i.e., no weight adaptation.')
     parser.add_argument('--sparse_init', type=str, default='snip', help='layer-wise sparsity ratio')
     parser.add_argument('--sparse_type', type=str, default='origin', help='fine-grad or coarse-grad when sparsify conv')
+    parser.add_argument('--sparse_gap', default=1, type=int, help='How many steps are required to align the sparse masks of different branches')
+    parser.add_argument('--use_embed_mask', type=str2bool, default=False)
     parser.add_argument('-u', '--update-frequency', type=int, default=100, metavar='N', help='how many iterations to adapt weights')
     parser.add_argument('--only_L', action='store_true', help='only sparsify large kernels.')
+    parser.add_argument('--Params', action='store_true', help='calculate params after sparsity.')
     parser.add_argument('--bn', type=str2bool, default=True, help='add batch norm layer after each path')
 
 
@@ -311,9 +316,18 @@ def main(args):
         head_init_scale=args.head_init_scale,
         kernel_size=args.kernel_size,
         width_factor=args.width_factor,
+        # ghost_ratio=(1-1/args.width_factor),
+        ghost_ratio=args.ghost_ratio,
+        N_path=args.N_path,
+        N_rep=args.N_rep,
         Decom=args.Decom,
         bn = args.bn
         )
+    # save model file to output dir
+    create_fn_ = model_entrypoint(args.model)
+    co_filename_ = create_fn_.__code__.co_filename
+    new_filename_ = os.path.join(args.output_dir, 'model.py')
+    os.system(f"cp {co_filename_} {new_filename_}")
 
     if args.finetune:
         if args.finetune.startswith('https'):
@@ -339,6 +353,12 @@ def main(args):
         utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
     model.to(device)
 
+    if args.Params:
+        for m in model.modules():
+            if hasattr(m, 'reparameterize'):
+                m.reparameterize()
+        model.apply(model._init_weights)
+
     model_ema = None
     if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
@@ -351,9 +371,10 @@ def main(args):
 
     model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_non_zeros = sum((p != 0).sum().int().item() for p in model.parameters() if p.requires_grad)
 
     print("Model = %s" % str(model_without_ddp))
-    print('number of params:', n_parameters)
+    print('number of params:', n_parameters,', number of non-zeor-params:', n_non_zeros)
 
     total_batch_size = args.batch_size * args.update_freq * utils.get_world_size()
     num_training_steps_per_epoch = len(dataset_train) // total_batch_size
@@ -418,13 +439,21 @@ def main(args):
     print('~'*50)
 
     if args.eval:
+        flops_of_model(model.eval(), args.input_size, verbose=True)
+        
+        #----------------------
+        for m in model.modules():
+            if hasattr(m, 'reparameterize'):
+                m.reparameterize()
 
-        for name, weight in model.named_parameters():
-            print(f"{name} density is {(weight != 0.0).sum().item()/weight.numel()}")
         test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
         print(f"Accuracy of the network on {len(dataset_val)} test images: {test_stats['acc1']:.5f}%")
-
+        #----------------------
+        flops_of_model(model.eval(), args.input_size, verbose=False)
         return
+        
+    n_non_zeros = sum((p != 0).sum().int().item() for p in model.parameters() if p.requires_grad)
+    print('~~ number of params:', n_parameters,', number of non-zeor-params:', n_non_zeros)
 
     # num_training_steps_per_epoch is the number of the actual training steps
     mask=None
@@ -433,13 +462,19 @@ def main(args):
         args.growth += '_sum'
     if args.sparse:
         decay = CosineDecay(args.prune_rate, int(num_training_steps_per_epoch*args.epochs), init_step= int(num_training_steps_per_epoch)*(args.start_epoch))
-        mask = Masking(optimizer, train_loader=data_loader_train, prune_mode=args.prune, prune_rate_decay=decay, growth_mode=args.growth, redistribution_mode=args.redistribution, args=args)
+        mask = Masking(optimizer, train_loader=data_loader_train, prune_mode=args.prune, prune_rate_decay=decay, growth_mode=args.growth, 
+                       use_embed_mask=args.use_embed_mask, redistribution_mode=args.redistribution, args=args)
         if args.sparse_type == 'origin':
             mask.add_module(model)
         elif args.sparse_type == 'coarse':
             mask.add_module_sum(model)
-        else:#rep_coarse
+        elif args.sparse_type == 'rep_coarse':
             mask.add_module_sum_rep(model)
+        # elif args.sparse_type == 'fix_coarse':
+        #     mask.add_module_sum_fix(model)
+        else: #'rep_chunk'
+            n_chunk=2
+            mask.add_module_sum_chunk(model, n_chunk)
 
     max_accuracy = 0.0
     if args.model_ema and args.model_ema_eval:
@@ -459,20 +494,51 @@ def main(args):
             log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
         if wandb_logger:
             wandb_logger.set_steps()
+        if args.Params: 
+            # for apply mask from SNIP
+            num_training_steps_per_epoch=2 + args.update_freq
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer,
             device, epoch, loss_scaler, args.clip_grad, model_ema, mixup_fn,
             log_writer=log_writer, wandb_logger=wandb_logger, start_steps=epoch * num_training_steps_per_epoch,
             lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
             num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
-            use_amp=args.use_amp, mask=mask
+            use_amp=args.use_amp, mask=mask, argsParams=args.Params
         )
+        
+        # #######################
+        # 为了查看保存的model
+        # print('#######'*30)
+        # torch.save({'mask':mask},'xx.pth')
+        # utils.save_model(
+        #     mask=mask, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+        #     mask_step=0 if mask is None else mask.steps, mask_decay=None if mask is None else decay,
+        #     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
+        # #######################
+
+        if args.Params: 
+            n_non_zeros = sum((p != 0).sum().int().item() for p in model.parameters() if p.requires_grad)
+            cum_sp, cum_all = 0, 0
+            for name, weight in model.named_parameters():
+                _sp=(weight != 0.0).sum().item()
+                _all=weight.numel()
+                cum_sp += _sp
+                cum_all += _all
+                print(f"{name} density is {_sp/_all}, shape is {weight.shape}, sparse is {_sp}, numel is {_all}, has grad {weight.requires_grad}| cum_sp:{cum_sp}, cum: {cum_all}")
+            # parameters
+            n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            n_non_zeros = sum((p != 0).sum().int().item() for p in model.parameters() if p.requires_grad)
+            print('// number of params:', n_parameters,', number of non-zeor-params:', n_non_zeros)
+            # flops
+            flops_of_model(model.eval(), args.input_size, args.world_size)
+            return
+
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
                 utils.save_model(
                     args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
-        if data_loader_val is not None:
+        if data_loader_val is not None and epoch>70:#
             test_stats = evaluate(data_loader_val, model, device, use_amp=args.use_amp)
             print(f"Accuracy of the model on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
             if max_accuracy < test_stats["acc1"]:

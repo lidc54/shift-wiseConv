@@ -15,6 +15,7 @@ from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from PIL import Image
 from erf.resnet_for_erf import resnet101, resnet152
 from SLaK_for_erf import SLakForERF
+from SW_for_erf import SWForERF
 from torch import optim as optim
 
 def str2bool(v):
@@ -82,7 +83,8 @@ def main(args):
     elif args.model == 'ConvNeXt':
         model = SLakForERF(kernel_size=[7, 7, 7, 7, 100])
     else:
-        raise ValueError('Unsupported model. Please add it here.')
+        model = SWForERF()
+        # raise ValueError('Unsupported model. Please add it here.')
 
     if args.weights is not None:
         print('load weights')

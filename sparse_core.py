@@ -12,14 +12,55 @@ def snip_core(grad, weight,name=None,net=None):
 
 def snip_core_sum(grad, weight,name=None,net=None):
     _core = torch.abs(weight*grad)
-    return torch.sum(_core, (2,3))
+    if len(weight.size()) == 2:
+        return _core
+    return torch.mean(_core, (2,3))
 
 def snip_core_sum_rep(grad, weight,name=None,named_parameters=None):
     _core = torch.abs(weight*grad) 
-    weight_rep = named_parameters[name]
-    grad_rep = weight_rep.grad
-    _core_rep = torch.abs(weight_rep*grad_rep)
-    return torch.sum(_core+_core_rep, (2,3))
+    # 开启如下模块会变得各stage的稀疏度非常畸形
+    # N_rep=9
+    # for i in range(1, N_rep):
+    #     rep_name=name.replace('0.weight',f'{i}.weight')
+    #     if rep_name not in named_parameters:continue
+    #     print('++++++++++',rep_name)
+    #     weight_rep = named_parameters[rep_name]
+    #     grad_rep = weight_rep.grad
+    #     _core_rep = torch.abs(weight_rep*grad_rep)
+    #     _core+=_core_rep
+    if len(weight.size()) == 2:
+        return _core
+    return torch.mean(_core, (2,3))
+
+def snip_core_cat_rep(grad, weight,name=None,named_parameters=None):
+    _core = torch.abs(weight*grad) 
+    if len(weight.size()) == 2:
+        return _core
+    N_rep=9
+    out_core=[torch.mean(_core, (2,3))]
+    for i in range(1, N_rep):
+        rep_name=name.replace('0.weight',f'{i}.weight')
+        if rep_name not in named_parameters:continue
+        print('++++++++++',rep_name)
+        weight_rep = named_parameters[rep_name]
+        grad_rep = weight_rep.grad
+        _core_rep = torch.abs(weight_rep*grad_rep)
+        out_core.append(torch.mean(_core_rep, (2,3)))
+    return torch.cat(out_core, dim=1)
+
+def fix_SNIP_sparse(layer_wise_sparsities, masks):
+    new_layer_wise_sparsities = []
+    for sparsity_, name in zip(layer_wise_sparsities, masks):
+        if 'stages.0' in name: # 0.1 valueable
+            sparsity_ = max(1-0.1, sparsity_)
+        if 'stages.1' in name:
+            sparsity_ = max(1-0.68, sparsity_)
+        if 'stages.2' in name:
+            sparsity_ = max(1-0.72, sparsity_)
+        if 'stages.3' in name: # 0.9 valueable
+            sparsity_ = 1-0.9
+        new_layer_wise_sparsities.append(sparsity_)
+    return new_layer_wise_sparsities
 
 def SNIP(net, keep_ratio, train_dataloader, device, masks, args, gw_fun=snip_core):
     if args.distributed:
@@ -61,6 +102,65 @@ def SNIP(net, keep_ratio, train_dataloader, device, masks, args, gw_fun=snip_cor
     net.zero_grad()
     return layer_wise_sparsities
 
+def default_SNIP(net, keep_ratio, train_dataloader, device, masks, args, gw_fun=snip_core):
+    if args.distributed:
+        train_dataloader.sampler.set_epoch(0)
+
+    # Grab a single batch from the training dataset
+    images, labels = next(iter(train_dataloader))
+    input_var = images.to(device, non_blocking=True)
+    target_var = labels.to(device, non_blocking=True)
+
+    # Let's create a fresh copy of the network so that we're not worried about
+    # affecting the actual training-phase
+    net = copy.deepcopy(net)
+    net.zero_grad()
+    outputs = net(input_var)
+    loss = F.cross_entropy(outputs, target_var)
+    loss.backward()
+
+    pwconv_grads_abs = []
+    lk_grads_abs = []
+    grads_abs = []
+    grads_idx = []
+    named_parameters=dict(net.named_parameters())
+    for name, weight in net.named_parameters():
+        if name not in masks: continue
+        # grads_abs.append(torch.abs(weight*weight.grad))
+        grad_mark = gw_fun(weight, weight.grad,name,named_parameters)
+        grads_abs.append(grad_mark)
+        if 'large_kernel.LoRA' in name:
+            grads_idx.append(0)
+            lk_grads_abs.append(grad_mark)
+        else:
+            grads_idx.append(1)
+            pwconv_grads_abs.append(grad_mark)
+
+    def get_acceptable_score(grads_abs_, keep_ratio):
+        # Gather all scores in a single vector and normalise
+        all_scores = torch.cat([torch.flatten(x) for x in grads_abs_])
+        num_params_to_keep = int(len(all_scores) * keep_ratio)
+        threshold, _ = torch.topk(all_scores, num_params_to_keep, sorted=True)
+        acceptable_score = threshold[-1]
+        return acceptable_score
+    
+    lk_cceptable_score = get_acceptable_score(lk_grads_abs, keep_ratio)
+    if len(pwconv_grads_abs):
+        pwconv_cceptable_score = get_acceptable_score(pwconv_grads_abs, keep_ratio)
+    else:
+        pwconv_cceptable_score = 0
+    acceptable_scores = [lk_cceptable_score, pwconv_cceptable_score]
+
+    layer_wise_sparsities = []
+    for ii,g in enumerate(grads_abs):
+        acceptable_score = acceptable_scores[grads_idx[ii]]
+        mask = (g > acceptable_score).float()
+        sparsity = float((mask==0).sum().item() / mask.numel())
+        layer_wise_sparsities.append(sparsity)
+
+    net.zero_grad()
+    return layer_wise_sparsities
+
 class CosineDecay(object):
     """Decays a pruning rate according to a cosine schedule
 
@@ -92,11 +192,13 @@ class Masking(object):
         model = MyModel()
         mask.add_module(model)
     """
-    def __init__(self, optimizer, train_loader, prune_rate_decay, prune_rate=0.5, prune_mode='magnitude', growth_mode='random', redistribution_mode='momentum', verbose=False, fp16=False, args=False):
+    def __init__(self, optimizer, train_loader, prune_rate_decay, prune_rate=0.5, prune_mode='magnitude', growth_mode='random', use_embed_mask=False, redistribution_mode='momentum', verbose=False, fp16=False, args=False):
         growth_modes = ['random', 'momentum', 'momentum_neuron', 'gradient', 'magnitude_sum', 'random_sum']
         if growth_mode not in growth_modes:
             print('Growth mode: {0} not supported!'.format(growth_mode))
             print('Supported modes are:', str(growth_modes))
+        print('growth_modes is:', str(growth_mode))
+        print('prune_mode is:', str(prune_mode))
         self.args = args
         self.device = torch.device(args.device)
         self.growth_mode = growth_mode
@@ -127,6 +229,13 @@ class Masking(object):
         self.half = fp16
         self.name_to_32bit = {}
 
+        # multi path in "rep" mode. all path share same mask
+        self.use_rep=False
+        self.use_embed_mask=use_embed_mask
+        # multi path in "chunk" mode. all path share same mask
+        self.use_chunk=False
+        self.n_chunk=1
+
         if self.args.fix:
             self.args.update_frequency = None
 
@@ -134,18 +243,22 @@ class Masking(object):
     #想法就是mask不加rep， xx=pi_net.state_dict() xx.keys()， 上面的snip中使用statedict
     #最后mask再复制到rep中
     def add_module_sum_rep(self, module):
+        self.use_rep=True
         self.modules.append(module)
         self.module = module
-        print('￥￥￥￥￥￥￥￥￥'*10)
+        print('￥￥SUM_REP￥￥'*10)
         for name, tensor in module.named_parameters():
             if len(tensor.size()) == 2 or len(tensor.size()) == 4:
-                if self.args.only_L:
-                    if 'large_kernel.LoRA' in name and 'rep' not in name:# only conv and bn_bias and bn_weight
-                        self.names.append(name)
-                        print('---', name)
-                        cin, cout, k1, k2 = tensor.shape
-                        self.masks[name] = torch.zeros((cin, cout, 1, 1), dtype=torch.float32, requires_grad=False).to(self.device)
-                else:
+                # if self.args.only_L:
+                if 'large_kernel.LoRA' in name:
+                    mark=name.split('large_kernel.LoRA')[1]
+                    if ('LoRA.weight' not in name) and ('0.weight' not in mark): 
+                        continue
+                    self.names.append(name)
+                    print('---', name)
+                    cin, cout, k1, k2 = tensor.shape
+                    self.masks[name] = torch.zeros((cin, cout, 1, 1), dtype=torch.float32, requires_grad=False).to(self.device)
+                elif not self.args.only_L and 'pwconv' in name:
                     print('+++', name)
                     self.names.append(name)
                     self.masks[name] = torch.zeros_like(tensor, dtype=torch.float32, requires_grad=False).to(self.device)
@@ -153,36 +266,70 @@ class Masking(object):
         # print('￥￥￥￥￥￥￥￥￥'*10)
         # for name in self.masks: print(name, self.masks[name].shape)
         if self.args.sparse_init == 'snip':
-            self.init_sum_snip(density=1-self.args.sparsity, gw_fun=snip_core_sum_rep)
+            # self.init_sum_snip(density=1-self.args.sparsity, gw_fun=snip_core_sum_rep)
+            self.init_sum_snip(density=1-self.args.sparsity, gw_fun=snip_core_cat_rep)
         
         mask_keys=list(self.masks.keys())
+
+        N_rep=9
+        named_parameters=dict(self.module.named_parameters())
         for name in mask_keys:
-            rep_name=name.replace('split_convs','split_rep_convs')
-            data=copy.deepcopy(self.masks[name])
-            self.masks[rep_name]=data
-        print('￥￥￥￥￥￥￥￥￥'*10)
+            for i in range(N_rep):
+                rep_name=name.replace('0.weight',f'{i}.weight')
+                if rep_name not in named_parameters:continue
+                # rep_name=name.replace('split_convs','split_rep_convs')
+                data=copy.deepcopy(self.masks[name])
+                self.masks[rep_name]=data
+        print('￥￥SUM_REP￥￥'*10)
         for name in self.masks: 
             print(name, self.masks[name].shape)
+
+    # 将group conv的每一层作为一个整体，同时chunk为n层。
+    def add_module_sum_chunk(self, module,n_chunk):
+        self.use_chunk=True
+        self.n_chunk=n_chunk
+        self.modules.append(module)
+        self.module = module
+        print('##CHUNK##'*10)
+        for name, tensor in module.named_parameters():
+            if len(tensor.size()) == 2 or len(tensor.size()) == 4:
+                # if self.args.only_L:
+                if 'large_kernel.LoRA' in name:# only conv and bn_bias and bn_weight
+                    # if "XX" in name: continue
+                    self.names.append(name)
+                    print('---', name)
+                    cin, cout, k1, k2 = tensor.shape
+                    self.masks[name] = torch.zeros((cin//n_chunk, cout, 1, 1), dtype=torch.float32, requires_grad=False).to(self.device)
+                elif not self.args.only_L and 'downsample_layers' not in name:
+                    print('+++', name)
+                    self.names.append(name)
+                    self.masks[name] = torch.zeros_like(tensor, dtype=torch.float32, requires_grad=False).to(self.device)
+
+        print('##CHUNK##'*10,'----', n_chunk)
+        for name in self.masks: print(name, self.masks[name].shape)
+        if self.args.sparse_init == 'snip':
+            self.init_sum_snip(density=1-self.args.sparsity, gw_fun=snip_core_sum)
 
     # 后来添加，目的是将group conv的每一层作为一个整体
     def add_module_sum(self, module):
         self.modules.append(module)
         self.module = module
-        print('@@@@@@'*10)
+        print('@@SUM@@'*10)
         for name, tensor in module.named_parameters():
             if len(tensor.size()) == 2 or len(tensor.size()) == 4:
-                if self.args.only_L:
-                    if 'large_kernel.LoRA' in name:# only conv and bn_bias and bn_weight
-                        self.names.append(name)
-                        print('---', name)
-                        cin, cout, k1, k2 = tensor.shape
-                        self.masks[name] = torch.zeros((cin, cout, 1, 1), dtype=torch.float32, requires_grad=False).to(self.device)
-                else:
+                # if self.args.only_L:
+                if 'large_kernel.LoRA' in name:# only conv and bn_bias and bn_weight
+                    # if "XX" in name: continue
+                    self.names.append(name)
+                    print('---', name)
+                    cin, cout, k1, k2 = tensor.shape
+                    self.masks[name] = torch.zeros((cin, cout, 1, 1), dtype=torch.float32, requires_grad=False).to(self.device)
+                elif not self.args.only_L and 'downsample_layers' not in name:
                     print('+++', name)
                     self.names.append(name)
                     self.masks[name] = torch.zeros_like(tensor, dtype=torch.float32, requires_grad=False).to(self.device)
 
-        print('@@@@@@'*10)
+        print('@@SUM@@'*10)
         for name in self.masks: print(name, self.masks[name].shape)
         if self.args.sparse_init == 'snip':
             self.init_sum_snip(density=1-self.args.sparsity, gw_fun=snip_core_sum)
@@ -194,12 +341,19 @@ class Masking(object):
 
         print('initialize by snip')
         self.baseline_nonzero = 0
-        layer_wise_sparsities = SNIP(self.module, density, self.train_loader, self.device, self.masks, self.args, gw_fun=gw_fun)
+        # layer_wise_sparsities = SNIP(self.module, density, self.train_loader, self.device, self.masks, self.args, gw_fun=gw_fun)
+        layer_wise_sparsities = default_SNIP(self.module, density, self.train_loader, self.device, self.masks, self.args, gw_fun=gw_fun)
+        # layer_wise_sparsities = fix_SNIP_sparse(layer_wise_sparsities, self.masks)
 
         for sparsity_, name in zip(layer_wise_sparsities, self.masks):
             self.masks[name][:] = (torch.rand(self.masks[name].shape) < (1 - sparsity_)).float().data.to(
                 self.device)
- 
+
+        masks=copy.deepcopy(self.masks)
+        self.masks={}
+        keys=list(masks.keys())
+        keys.sort(key=lambda x:len(x))
+        for k in keys:self.masks[k]=masks[k]
 
         total_size = 0
         sparse_size = 0
@@ -428,20 +582,60 @@ class Masking(object):
             for name, tensor in module.named_parameters():
                 if name in self.masks:
                     if not self.half:
-                        tensor.data = tensor.data*self.masks[name]
-                        if 'momentum_buffer' in self.optimizer.state[tensor]:
-                            self.optimizer.state[tensor]['momentum_buffer'] = self.optimizer.state[tensor]['momentum_buffer']*self.masks[name]
+                        if self.use_chunk:
+                            mask=self.masks[name]
+                            mask=mask.unsqueeze(1).repeat(1,self.n_chunk,1,1,1).reshape(-1,1,1,1)
+                            tensor.data = tensor.data*mask
+                            if 'momentum_buffer' in self.optimizer.state[tensor]:
+                                self.optimizer.state[tensor]['momentum_buffer'] = self.optimizer.state[tensor]['momentum_buffer']*mask
+                        else:
+                            tensor.data = tensor.data*self.masks[name]
+                            if 'momentum_buffer' in self.optimizer.state[tensor]:
+                                self.optimizer.state[tensor]['momentum_buffer'] = self.optimizer.state[tensor]['momentum_buffer']*self.masks[name]
                     else:
                         tensor.data = tensor.data*self.masks[name].half()
                         if name in self.name_to_32bit:
                             tensor2 = self.name_to_32bit[name]
                             tensor2.data = tensor2.data*self.masks[name]
 
+    def prun_sub_topk(self, prune_rate, name, weight=None):
+        """
+        The first branch, in terms of sparsity, has three key features: difference, randomness, and subset, when compared to the other branches
+        """
+        num_remove = math.ceil(prune_rate*self.name2nonzeros[name])
+        num_zeros = self.name2zeros[name]
+        k = math.ceil(num_zeros + num_remove)
+        idx = None
+        if weight is not None:
+            assert len(weight.data.shape)==4, 'weight should come from a conv'
+            w=torch.sum(torch.abs(weight.data),(2,3),keepdim=True)
+            if num_remove == 0.0: idx = None
+
+            x, idx = torch.sort(w.view(-1))
+        return k, idx
+    
     def truncate_weights(self):
 
         for module in self.modules:
+            state_dict=module.state_dict()
             for name, weight in module.named_parameters():
                 if name not in self.masks: continue
+                if self.use_rep and (self.steps // self.args.update_frequency % self.args.sparse_gap == 0):
+                    if '.0.weight' not in name:continue
+                    weight=torch.abs(weight.detach())
+                    for ii in range(1,9):
+                        rep_name = name.replace('.0.weight', f'.{ii}.weight')
+                        if rep_name not in state_dict: continue
+                        weight += torch.abs(state_dict[rep_name].detach())
+                if self.use_chunk:
+                    weight=torch.abs(weight.detach())
+                    oc,ic,ks,ks=weight.shape
+                    weight=weight.reshape(-1,self.n_chunk,ic,ks,ks).sum(1)
+                #         print(f'{ii} ', end='')
+                # print('prune-->: ',name)
+                if len(weight.data.shape)==2:
+                    weight = weight.detach().unsqueeze(2).unsqueeze(3)
+
                 mask = self.masks[name]
                 self.name2nonzeros[name] = mask.sum().item()
                 self.name2zeros[name] = mask.numel() - self.name2nonzeros[name]
@@ -450,14 +644,58 @@ class Masking(object):
                 removed = self.name2nonzeros[name] - new_mask.sum().item()
                 self.name2removed[name] = removed
                 self.masks[name][:] = new_mask
+                # copy prune out to other path
+                if self.use_rep and (self.steps // self.args.update_frequency % self.args.sparse_gap == 0):
+                    if '.0.weight' not in name:continue
+                    rep_idx=None
+                    for ii in range(1,9):
+                        rep_name = name.replace('.0.weight', f'.{ii}.weight')
+                        if rep_name not in self.masks: continue
+                        if self.use_embed_mask:
+                            # prune
+                            # sparsity become 0.5 from 0.7 for rep
+                            rep_weight = None if ii > 1 else weight
+                            rep_mask = self.masks[rep_name]
+                            self.name2nonzeros[rep_name] = rep_mask.sum().item()
+                            self.name2zeros[rep_name] = rep_mask.numel() - self.name2nonzeros[name]
+                            rep_k, rep_idx = self.prun_sub_topk(self.prune_rate*5/3, rep_name, rep_weight) # more prune
+                            rep_mask.data.view(-1)[rep_idx[:rep_k]] = 0.0
+                            rep_removed = self.name2nonzeros[rep_name] - rep_mask.sum().item()
+                            self.name2removed[rep_name] = rep_removed
+                            self.masks[rep_name][:] = rep_mask
+                        else:
+                            self.name2nonzeros[rep_name] = self.name2nonzeros[name]
+                            self.name2zeros[rep_name] = self.name2zeros[name]
+                            self.name2removed[rep_name] = self.name2removed[name]
+
+                #         print(f'{ii} ', end='')
+                # print('prune copy other mask: ',name)
 
         for module in self.modules:
             for name, weight in module.named_parameters():
                 if name not in self.masks: continue
-                new_mask = self.masks[name].data.byte()
+                if self.use_rep and (self.steps // self.args.update_frequency % self.args.sparse_gap == 0) and ('.0.weight' not in name):
+                    continue
+                new_mask_ = self.masks[name].data.byte()
                 # growth
-                new_mask = self.growth_func(self, name, new_mask, math.floor(self.name2removed[name]), weight)
+                new_mask = self.growth_func(self, name, new_mask_, math.floor(self.name2removed[name]), weight)
+                diff_mask = new_mask_ ^ new_mask # grown part for path zero
                 self.masks[name][:] = new_mask.float()
+                # copy mask to other path
+                if self.use_rep and (self.steps // self.args.update_frequency % self.args.sparse_gap == 0):
+                    if '.0.weight' not in name:continue
+                    for ii in range(1,9):
+                        rep_name = name.replace('.0.weight', f'.{ii}.weight')
+                        if rep_name not in self.masks: continue
+                        if self.use_embed_mask:
+                            rep_mask = self.masks[rep_name].data.byte()
+                            diff = (torch.rand(new_mask.shape).cuda() < (5/7)) & diff_mask # part of new grown
+                            new_mask_ = rep_mask | diff
+                            self.masks[rep_name][:] = new_mask_.float()
+                        else:
+                            self.masks[rep_name][:] = new_mask.float()
+                #         print(f'{ii} ', end='')
+                # print('growth-->: ',name)
 
         self.apply_mask()
 
@@ -489,6 +727,8 @@ class Masking(object):
                 print(val)
 
         print('Prune rate: {0}\n'.format(self.prune_rate))
+        if self.use_rep:
+            print(f'use rep--> share mask among different path using {self.prune_func.__name__} and {self.growth_func.__name__} | sparse_gap: {self.steps // self.args.update_frequency % self.args.sparse_gap} equal 0 will using same mask for multi-path')
 
     def fired_masks_update(self):
         ntotal_fired_weights = 0.0

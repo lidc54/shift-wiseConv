@@ -18,14 +18,14 @@ conda install pytorch==1.10.0 torchvision==0.11.0 torchaudio==0.10.0 cudatoolkit
 pip install timm tensorboardX six
 ```
 
+**The code and model for Shiftwise will be released soon.**
 
-## based on repository [Sparse Large Kernel Network - SW](https://github.com/VITA-Group/SW)
+## Results and ImageNet-1K trained models
 
  **name**   | **resolution** | **acc@1**       | **model**                                                                                          
 :----------:|:--------------:|:---------------:|:--------------------------------------------------------------------------------------------------:
- **SW-T** | 224x224        | 83.39(300epoch)  | []() 
+ **SW-tiny** | 224x224        | 83.39(300epoch)  | [Google Drive](https://drive.google.com/file/d/1U4DOZv5V9_7wJdqdicjp0tCmNIdRNJOc/view?usp=sharing) 
                          
 
-## cite
-If you find this repository useful, please consider giving a star star and cite our paper.
-
+<!-- ## cite
+If you find this repository useful, please consider giving a star star and cite our paper. -->
