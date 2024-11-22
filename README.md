@@ -1,6 +1,9 @@
 # [shift-wise conv](https://github.com/lidc54/shift-wiseConv)
 Our research finds that $3 \times 3$ convolutions can replace larger ones in CNNs, enhancing performance and echoing VGG's results. It also introduces novel parameter settings that have not been previously explored.
 
+<p align="center">
+<img src="SW.png" width="500" height="320">
+</p>
 
 ## Installation
 
