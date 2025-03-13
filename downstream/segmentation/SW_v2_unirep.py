@@ -4,6 +4,9 @@
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
+# pw：patch-wise
+import sys, os
+sys.path.append('/root/shiftadd/')
 
 import math
 import torch
@@ -115,9 +118,188 @@ def fuse_bn(conv, bn):
 
 class ShifthWiseConv2dImplicit(nn.Module):
     '''
-    will be displayed soon
+    Using shift is equivalent to using a large convolution kernel.
     '''
-    pass
+    def __init__(self,
+                in_channels,
+                out_channels,
+                big_kernel,
+                small_kernel=3,
+                stride=1,
+                group=1,
+                bn=True,
+                use_small_conv=True,
+                ghost_ratio=0.23,
+                N_path=2, # multi path
+                N_rep=4, # multi split
+                bias=False):
+        super().__init__()
+        self.kernels = (small_kernel, big_kernel)
+        self.stride = stride
+        
+        # add same padding for vertical and horizon axis. should delete it accordingly
+        padding, real_pad = self.shift(self.kernels)
+        self.pad = padding, real_pad
+        self.nk = math.ceil(big_kernel / small_kernel)
+        
+        # only part of input will using shift-wise
+        repN=int(in_channels*(1-ghost_ratio))//2*2
+        ghostN= in_channels - repN
+        
+        np.random.seed(123)  
+        ghost = np.random.choice(in_channels,ghostN,replace=False).tolist()
+        ghost.sort()
+        rep=list(set(range(in_channels))-set(ghost))
+        rep.sort()
+        assert len(rep)==repN,f'len(rep):{len(rep)}==repN:{repN}'
+        self.ghost=torch.IntTensor(ghost)
+        self.rep=torch.IntTensor(rep)
+
+        out_n = repN * self.nk
+        self.LoRA = None
+        self.LoRAs = nn.ModuleList([
+            nn.Conv2d(repN, out_n,
+                kernel_size=small_kernel, stride=stride,
+                padding=padding, groups=repN,
+                bias=False)
+            for _ in range(N_path)
+        ])
+        
+        # self.ghost_conv = nn.Conv2d(repN, repN,
+        #                             kernel_size=small_kernel, stride=stride,
+        #                             padding=small_kernel//2, groups=repN,
+        #                             bias=False)
+        
+        self.device = None
+        print(f'ghost_ratio={ghost_ratio},N_rep={N_rep},N_path={N_path}, use_se={use_se}, sync_bn={use_sync_bn}')
+        self.use_bn = bn
+
+        self.loras=AddShift_mp_module(big_kernel, small_kernel, repN, out_n, N_rep)
+        self.bn_loras = None
+        # self.bn_sum = get_bn(repN)
+        if bn:
+            # self.bn_loras = nn.ModuleList([get_bn(out_n) for _ in range(N_path)])
+            self.bn_lora1 = get_bn(repN)
+            self.bn_lora2 = get_bn(repN)
+            self.bn_small = get_bn(repN)
+        else:
+            self.bn_loras = None
+            self.bn_lora1 = None
+            self.bn_lora2 = None
+            self.bn_small = None
+
+        self.inputsize=True
+
+    def ghost_mask(self):
+        # all output is masked 
+        weight=0
+        for name, tensor in self.named_parameters():
+            if len(tensor.size()) == 4 and 'LoRA' in name:
+                weight += torch.sum(torch.abs(tensor.detach()),(1,2,3))
+        weight = torch.sum((weight>0).reshape(-1, self.nk), 1)
+        ghost = (weight==0).reshape(1,-1,1,1).float() 
+        return ghost.detach()
+    
+    def forward(self, inputs):
+        if self.inputsize:
+            print(f'shape:{inputs.shape}; kernel:{self.kernels}')
+            self.inputsize=False
+            
+        # split output
+        ori_b, ori_c, ori_h, ori_w = inputs.shape
+        if self.device is None:
+            self.device = inputs.get_device()
+            if self.device ==-1:#cpu
+                self.device=None
+            else:
+                self.ghost=self.ghost.to(self.device)
+                self.rep=self.rep.to(self.device)
+        
+        ghost_inputs = torch.index_select(inputs, 1, self.ghost)
+        rep_inputs = torch.index_select(inputs, 1, self.rep)
+        
+        lora1_x = 0
+        lora2_x = 0
+        small_x = 0
+        #old
+        # for split_conv, lora in zip(self.LoRAs, self.loras):
+        #     out = split_conv(rep_inputs)
+        #     x1, x2, x3 = lora(out, ori_b, ori_h, ori_w)
+        #     lora1_x += x1
+        #     lora2_x += x2
+        #     small_x += x3
+        #new
+        out=0
+        
+        if self.LoRA is None: 
+            for ii, split_conv in enumerate(self.LoRAs):
+                xx = split_conv(rep_inputs)
+                if self.bn_loras is not None:
+                    xx = self.bn_loras[ii](xx)
+                out += xx
+        else:
+            out=self.LoRA(rep_inputs)
+
+        x1, x2, x3 = self.loras(out, ori_b, ori_h, ori_w)
+        lora1_x += x1
+        lora2_x += x2
+        small_x += x3
+
+        if self.use_bn:
+            lora1_x = self.bn_lora1(lora1_x)
+            lora2_x = self.bn_lora2(lora2_x) 
+            small_x = self.bn_small(small_x)
+        x = lora1_x + lora2_x + small_x + rep_inputs
+        # g_mask = self.ghost_mask()
+        # # x = lora1_x + lora2_x + small_x + rep_inputs * g_mask
+        # y = self.ghost_conv(rep_inputs)
+        # x = lora1_x + lora2_x + small_x + y * g_mask
+        # x = self.bn_sum(x)
+ 
+        x=torch.cat([x,ghost_inputs],dim=1)
+        return x
+     
+
+    def shift(self, kernels):
+        '''
+        We assume the conv does not change the feature map size, so padding = bigger_kernel_size//2. Otherwise,
+        you may configure padding as you wish, and change the padding of small_conv accordingly.
+        '''
+        mink, maxk = min(kernels), max(kernels)
+        nk = math.ceil(maxk / mink) 
+        # 2. padding
+        padding = mink -1  
+        # padding = mink // 2
+        # 3. pads for each idx
+        mid=maxk // 2
+        real_pad=[]
+        for i in range(nk): 
+            extra_pad=mid-i*mink - padding 
+            real_pad.append(extra_pad)
+        return padding, real_pad
+
+    def merge_branches(self):
+        if self.LoRA is None: 
+            bias=True if self.LoRAs[0].bias else False
+            LoRA = nn.Conv2d(in_channels=self.LoRAs[0].in_channels,
+                            out_channels=self.LoRAs[0].out_channels,
+                            kernel_size=self.LoRAs[0].kernel_size,
+                            stride=self.LoRAs[0].stride,
+                            padding=self.LoRAs[0].padding,
+                            dilation=self.LoRAs[0].dilation,
+                            groups=self.LoRAs[0].groups,
+                            bias=bias
+                            )
+            weight,biasdata=0,0
+            for merged_conv in self.LoRAs:
+                weight+=merged_conv.weight.data
+                if bias:
+                    biasdata+=merged_conv.bias.data
+            
+            LoRA.weight.data = weight
+            if bias: LoRA.bias.data = biasdata
+            self.LoRA=LoRA
+            self.__delattr__('LoRAs') 
 
 def get_conv2d(in_channels, out_channels, big_kernel, small_kernel=3, stride=1, group=1, bn=True, use_small_conv=True, ghost_ratio=0.23, N_path=2, N_rep=4, bias=False, use_lk_impl=True):
     if use_lk_impl:

@@ -22,7 +22,8 @@ def print_model_param_nums(model=None):
     if model == None:
         model = torchvision.models.alexnet()
     total = sum([(param!=0).sum() if len(param.size()) == 4 or len(param.size()) == 2 else 0 for name,param in model.named_parameters()])
-    print('  + Number of params: %.2f' % (total))
+    # print('  + Number of params: %.2f' % (total))
+    return total
 
 
 def count_model_param_flops(model=None, input_res=224, multiply_adds=True):
@@ -62,7 +63,7 @@ def count_model_param_flops(model=None, input_res=224, multiply_adds=True):
         batch_size = input[0].size(0) if input[0].dim() == 2 else 1
 
         weight_ops = self.weight.nelement() * (2 if multiply_adds else 1)
-        bias_ops = self.bias.nelement()
+        bias_ops = self.bias.nelement() if self.bias is not None else 0
 
         flops = batch_size * (weight_ops + bias_ops)
         list_linear.append(flops)
@@ -129,7 +130,8 @@ def count_model_param_flops(model=None, input_res=224, multiply_adds=True):
     if model == None:
         model = torchvision.models.alexnet()
     foo(model)
-    input =Variable(torch.rand(1, 3, input_res, input_res), requires_grad = True)
+    device=list(model.parameters())[0].device
+    input =Variable(torch.rand(1, 3, input_res, input_res), requires_grad = True).to(device)
     out = model(input)
 
 

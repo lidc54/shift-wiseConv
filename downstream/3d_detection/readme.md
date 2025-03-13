@@ -39,6 +39,23 @@ pip install timm
   - line 502:  unexpected keyword argument 'verify'
 
 
+    
+<!-- - vim ~/.conda/envs/open-mmlab/lib/python3.8/site-packages/mmcv/utils/config.py, line 502 remove verify
+- vim ~/.conda/envs/open-mmlab/lib/python3.8/site-packages/mmdet/apis/train.py, Line 154, add: cfg.device='cuda'
+- vim ~/.conda/envs/open-mmlab/lib/python3.8/site-packages/mmdet/apis/train.py, line 154 passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel`
+- vim mmdetection3d/mmdet3d/apis/train.py, line 154 passing the keyword argument `find_unused_parameters=True` to `torch.nn.parallel.DistributedDataParallel` -->
+
+<!-- 
+## nuscenes 3D检测
+mmdetection3d dev-1.x
+    ```
+    mmcv        2.0.0rc4
+    mmdet       3.3.0
+    mmdet3d     1.4.0       /home/lili/cc/mmdetection3d
+    mmengine    0.10.5
+    numpy       1.24.3
+    ```
+数据nuscenes v1.0-trainval 475G, 数据准备可参考[相关介绍](https://mmdetection3d.readthedocs.io/zh-cn/latest/advanced_guides/datasets/nuscenes.html) -->
 
 
 # dataset (follow this [url](https://mmdetection3d.readthedocs.io/en/v1.0.0rc1/data_preparation.html#nuscenes))
@@ -99,6 +116,8 @@ eval_hook = EvalHook
 
 6. Or you may [finetune our released pretrained weights](https://mmdetection3d.readthedocs.io/en/v1.0.0rc1/1_exist_data_model.html#train-with-multiple-gpus)
 ```
+
+7. `./tools/dist_train.sh configs/SW/fcos3d_sw.py  8 2>&1 |tee work_dirs/sw.log`
 
 # [test](https://mmdetection3d.readthedocs.io/en/v1.0.0rc1/2_new_data_model.html#test-and-inference)
 [Evaluation](https://mmdetection3d.readthedocs.io/en/v1.0.0rc1/datasets/nuscenes_det.html#evaluation)

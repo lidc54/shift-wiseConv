@@ -170,7 +170,7 @@ class ShifthWiseConv2dImplicit(nn.Module):
         #     )
         
         self.device = None
-        # print(f'ghost_ratio={ghost_ratio},N_rep={N_rep},N_path={N_path}, use_se={use_se}, sync_bn={use_sync_bn}')
+        print(f'ghost_ratio={ghost_ratio},N_rep={N_rep},N_path={N_path}, use_se={use_se}, sync_bn={use_sync_bn}')
         self.use_bn = bn
 
         self.loras=AddShift_mp_module(big_kernel, small_kernel, repN, out_n, N_rep)
@@ -202,9 +202,9 @@ class ShifthWiseConv2dImplicit(nn.Module):
         return ghost.detach()
     
     def forward(self, inputs):
-        # if self.inputsize:
-        #     # print(f'shape:{inputs.shape}; kernel:{self.kernels}')
-        #     self.inputsize=False
+        if self.inputsize:
+            print(f'shape:{inputs.shape}; kernel:{self.kernels}')
+            self.inputsize=False
             
         # split output
         ori_b, ori_c, ori_h, ori_w = inputs.shape
@@ -350,6 +350,18 @@ class Block(nn.Module):
 
         self.large_kernel = get_conv2d(in_channels=dim, out_channels=dim, big_kernel=kernel_size[0], small_kernel=kernel_size[1], stride=1, group=dim, bn=bn, ghost_ratio=ghost_ratio, N_path=N_path, N_rep=N_rep, use_lk_impl=use_lk_impl)
 
+        # self.large_kernel = ShifthWiseConv2dImplicit(
+        #     in_channels=dim,
+        #     out_channels=dim,
+        #     big_kernel=kernel_size[0],
+        #     small_kernel=kernel_size[1],
+        #     stride=1,
+        #     group=dim,
+        #     bn=bn,
+        #     ghost_ratio=ghost_ratio,
+        #     N_path=N_path,
+        #     N_rep=N_rep
+        # )
         if use_se:
             self.norm = get_bn(dim)
             self.se = SEBlock(dim, dim // 4)
@@ -363,25 +375,27 @@ class Block(nn.Module):
 
         self.act = nn.Sequential(
             nn.GELU(),
+            # SwiGLU(4 * dim, dim, dropout=drop_path),
             GRNwithNHWC(4 * dim, use_bias=not deploy)
             )
-        
-        if deploy:
-            self.pwconv2 = nn.Sequential(
-                nn.Linear(4 * dim, dim),
-                NHWCtoNCHW())
-        else:
-            self.pwconv2 = nn.Sequential(
-                nn.Linear(4 * dim, dim, bias=False),
-                NHWCtoNCHW(),
-                get_bn(dim))
-        
+        self.pwconv2 = nn.Sequential(
+            nn.Linear(4 * dim, dim, bias=False),
+            NHWCtoNCHW(),
+            get_bn(dim)
+            )
+        # self.pwconv1 = nn.Linear(
+        #     dim, 4 * dim
+        # )  
+        # pointwise/1x1 convs, implemented with linear layers
+        # self.act = nn.GELU()
+        # self.pwconv2 = nn.Linear(4 * dim, dim)
         self.gamma = (
             nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True)
-            if (not deploy) and layer_scale_init_value > 0
+            if layer_scale_init_value > 0
             else None
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        # self.bn_block = get_bn(dim)
 
     def forward(self, x):
         input = x
@@ -403,6 +417,25 @@ class Block(nn.Module):
     def reparameterize(self):
         if hasattr(self.large_kernel, 'merge_branches'):
             self.large_kernel.merge_branches()
+        # if self.gamma is not None:
+        #     final_scale = self.gamma.data
+        #     self.gamma = None
+        # else:
+        #     final_scale = 1
+        # if self.act[1].use_bias and len(self.pwconv2) == 3:
+        #     grn_bias = self.act[1].beta.data
+        #     self.act[1].__delattr__('beta')
+        #     self.act[1].use_bias = False
+        #     linear = self.pwconv2[0]
+        #     grn_bias_projected_bias = (linear.weight.data @ grn_bias.view(-1, 1)).squeeze()
+        #     bn = self.pwconv2[2]
+        #     std = (bn.running_var + bn.eps).sqrt()
+        #     new_linear = nn.Linear(linear.in_features, linear.out_features, bias=True)
+        #     new_linear.weight.data = linear.weight * (bn.weight / std * final_scale).view(-1, 1)
+        #     linear_bias = 0 if linear.bias is None else linear.bias.data
+        #     linear_bias += grn_bias_projected_bias
+        #     new_linear.bias.data = (bn.bias + (linear_bias - bn.running_mean) * bn.weight / std) * final_scale
+        #     self.pwconv2 = nn.Sequential(new_linear, self.pwconv2[1])
 
 # patch-wise
 class ShiftWise_v2(nn.Module):
@@ -435,11 +468,10 @@ class ShiftWise_v2(nn.Module):
             N_path=2, # multi path
             N_rep=4, # multi split
             left_first_stage=False,
-            deploy=False,
             **kwargs,
     ):
         super().__init__()
-        # print(f'dims:{dims}, depths:{depths}')
+        print(f'dims:{dims}, depths:{depths}')
         dims = [int(x * width_factor) for x in dims]
         self.kernel_size = kernel_size
         self.downsample_layers = (
@@ -481,7 +513,6 @@ class ShiftWise_v2(nn.Module):
                         N_path=N_path, # multi path
                         N_rep=N_rep, # multi split
                         bn=bn,
-                        deploy=deploy,
                         use_lk_impl=True
                         # use_lk_impl=True if not left_first_stage else  (i>0) # use general dw for first stage
                         # use_lk_impl= (i>0) # use general dw for first stage
@@ -562,3 +593,19 @@ def ShiftWise_v2_small(pretrained=False, **kwargs):
     model = ShiftWise_v2(depths=[3, 3, 27, 3], dims=[96, 192, 384, 768], **kwargs)
 
     return model
+
+
+@register_model
+def ShiftWise_v2_base(pretrained=False, in_22k=False, **kwargs):
+    model = ShiftWise_v2(depths=[3, 3, 27, 3], dims=[128, 256, 512, 1024], **kwargs)
+
+    return model
+
+
+@register_model
+def ShiftWise_v2_large(pretrained=False, in_22k=False, **kwargs):
+    model = ShiftWise_v2(depths=[3, 3, 27, 3], dims=[192, 384, 768, 1536], **kwargs)
+
+    return model
+
+

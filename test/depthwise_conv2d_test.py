@@ -1,6 +1,6 @@
 import sys, os
 # Add WHERE_YOU_CLONED_CUTLASS/examples/19_large_depthwise_conv2d_torch_extension into your PYTHONPATH by the following commands:
-sys.path.append('SLaK/cutlass/examples/19_large_depthwise_conv2d_torch_extension')
+sys.path.append('../throughout/cutlass/examples/19_large_depthwise_conv2d_torch_extension')
 fp = os.path.dirname(os.path.dirname(__file__))
 sys.path.insert(0, fp)
 from depthwise_conv2d_implicit_gemm import DepthWiseConv2dImplicitGEMM

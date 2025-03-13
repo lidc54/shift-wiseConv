@@ -20,6 +20,10 @@ ln -s  ~/cc/dataset/coco/ data/coco
   ...
  from .SW_v2_unirep import ShiftWise_v2
   __all__ = ['ResNet', ..., 'ShiftWise_v2']
+
+  ...
+ from .unireplknet import UniRepLKNetBackbone
+  __all__ = ['ResNet', ..., 'UniRepLKNetBackbone']
   ```
 4. Put ```detection/configs/*.py``` into ```mmdetection/configs/SW/```; put files of ```mmdetection/mmdet/core/optimizers/``` into ```mmdetection/mmdet/core/optimizers/```.
 
@@ -40,8 +44,9 @@ Prepare COCO according to the guidelines in [MMDetection v2.28.1](https://github
 python tools/test.py configs/SW/cascade_mask_rcnn_sw_tiny_mstrain_480-800_adamw_3x_coco_in1k.py ctest77/epoch_2.pth --eval bbox segm
 ```
 7. vis COCO
-
-
+```
+python  tools/test.py configs/SW/in1k_fpn_3x_coco.py in1k_3x_coco_ap51.75.pth  --show-dir  your_showdir
+```
 8. [flops](https://mmdetection.readthedocs.io/en/v2.28.0/useful_tools.html#model-complexity)
 ```
 python tools/analysis_tools/get_flops.py work_dirs/tiny_flops.py  --shape 1280 800
