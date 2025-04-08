@@ -57,7 +57,7 @@ Moreover, the ERF component of SW is profoundly thought-provoking. Delving deepe
 
 If you use SW in your research, please consider the following BibTeX entry and giving us a star:
 ```BibTeX
-@inproceedings{lidc2024sw,
+@inproceedings{lidc2025sw,
   title={ShiftwiseConv: Small Convolutional Kernel with Large Kernel Effect},
   author={Dachong Li, Li Li, Zhuangzhuang Chen, Jianqiang Li},
   booktitle={CVPR},
