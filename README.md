@@ -1,12 +1,19 @@
 # (CVPR2025)ShiftwiseConv: Small Convolutional Kernel with Large Kernel Effect
-### [Arxiv](https://arxiv.org/abs/2401.12736)  |  [code](https://github.com/lidc54/shift-wiseConv)
+
+This is the official repository of 
+
+**ShiftwiseConv: Small Convolutional Kernel with Large Kernel Effect.** 
+*Dachong Li, Li Li, Zhuangzhuang Chen, Jianqiang Li.* CVPR 2025
+
+[![arxiv](https://shields.io/badge/paper-purple?logo=arxiv&style=for-the-badge)](https://arxiv.org/abs/2401.12736)
+[![webpage](https://img.shields.io/badge/GitHub-blue?logo=github&style=for-the-badge)](https://github.com/lidc54/shift-wiseConv)
+
 
 **TL;DR:** Our research finds that $3 \times 3$ convolutions can replace larger ones in CNNs, enhancing performance and echoing VGG's results. It also introduces novel parameter settings that have not been previously explored.
 
 <p align="center">
 <img src="SW.png" width="500" height="320">
 </p>
-
 **Abstract:**
 Large kernels make standard convolutional neural networks (CNNs) great again over transformer architectures in various vision tasks. 
 Nonetheless, recent studies meticulously designed around increasing kernel size have shown diminishing returns or stagnation in performance. Thus, the hidden factors of large kernel convolution that affect model performance remain unexplored. In this paper, we reveal that the key hidden factors of large kernels can be summarized as two separate components: extracting features at a certain granularity and fusing features by multiple pathways. To this end, we leverage the multi-path long-distance sparse dependency relationship to enhance feature utilization via the proposed Shiftwise (SW) convolution operator with a pure CNN architecture. In a wide range of vision tasks such as classification, segmentation, and detection, SW surpasses state-of-the-art transformers and CNN architectures, including SLaK and UniRepLKNet. More importantly, our experiments demonstrate that $3 \times 3$ convolutions can replace large convolutions in existing large kernel CNNs to achieve comparable effects, which may inspire follow-up works.
@@ -44,14 +51,25 @@ python -m torch.distributed.run  --master_port=29501 --nproc_per_node=8 main.py 
  **name**   | **resolution** | **acc@1**       | **log**       | **model**                                                                                          
 :----------:|:--------------:|:---------------:|:-------------:|:-------------:
  **SW-tiny** | 224x224        | 83.39(300epoch)  | [SW-T](backbones/SW_300_unirep_tiny_gap131_M2_N4_g023_s03.log) | [Google Drive](https://drive.google.com/file/d/1U4DOZv5V9_7wJdqdicjp0tCmNIdRNJOc/view?usp=sharing) 
-                         
+
 ## Notices
+
+**Additional CUDA Packages**
+
 In [ShiftAdd](shiftadd/), we've gone beyond providing just the CUDA modules essential for the PyTorch operators that SW is utilizing. We've also extended our offerings to include a range of additional experimental CUDA packages. These involve enhancements such as incorporating position encodings into shift-wise operations and the addition of adaptive weights. Each package is accompanied by validation code for the CUDA operators, guaranteeing that their outputs are as anticipated. We're hopeful that this will be of assistance to you and would be grateful for your endorsements and references.
+
+**ERF**
 
 Moreover, the ERF component of SW is profoundly thought-provoking. Delving deeper into its analysis might yield a treasure trove of valuable information.
 <p align="center">
 <img src="erf\sw_00.png">
 </p>
+
+**Puzzles to be Solved:**
+
+1. We found that the training results still show slight fluctuations even with the random seed fixed. When we tried a lower sparsity level (0.2), we achieved a higher classification accuracy (83.46, see Appendix C.2 of the paper). Meanwhile, the change in the number of parameters and computational load was minimal. This is an intriguing finding. (a. The exploration of sparsity was not sufficiently thorough; b. The instability in training also lacked resources for true confirmation and in-depth analysis.)
+
+2. On the nuScenes dataset, it is possible to achieve higher performance than reported in the paper (32.13). When both the classification task and the downstream task outperform the baseline, the performance across different hyperparameters is not always consistent between the two tasks. In other words, sometimes a hyperparameter setting that performs well on the classification task may perform slightly worse on the downstream task.
 
 ## Citation
 
@@ -64,3 +82,8 @@ If you use SW in your research, please consider the following BibTeX entry and g
   year={2025}
 }
 ```
+
+If you find this helpful in any way, a small donation would be greatly appreciated. Your support would go a long way in helping me continue my research. Thank you for considering!
+<p align="center">
+<img src="bmc_qr.png" width="200" height="200">
+</p>
