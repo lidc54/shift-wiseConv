@@ -85,5 +85,5 @@ If you use SW in your research, please consider the following BibTeX entry and g
 
 If you find this helpful in any way, a small donation would be greatly appreciated. Your support would go a long way in helping me continue my research. Thank you for considering!
 <p align="center">
-<img src="bmc_qr.png" width="200" height="200">
+<img src="bmc_qr.png" width="427" height="200">
 </p>
